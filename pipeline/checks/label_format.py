@@ -25,5 +25,46 @@ from ..common import ERROR, WARN, Issue, iou_xywh, parse_yolo_line  # noqa: F401
 
 
 def run(ds, cfg):
-    # TODO: duyệt từng file nhãn, từng dòng
-    raise NotImplementedError("check label_format chưa làm")
+    lf = cfg["label_format"]
+    tol, min_px = lf["overflow_tol"], lf["min_box_px"]
+    max_frac, dup_iou = lf["max_box_frac"], lf["dup_box_iou"]
+    n_cls = len(ds.classes)
+    issues = []
+
+    def add(sev, code, stem, msg, line, **extra):
+        issues.append(Issue("label_format", sev, code, stem, msg, line, extra))
+
+    for lp in ds.label_files():
+        stem = lp.stem
+        size = ds.image_size(stem) if ds.image_path(stem) else None   # None: ảnh hỏng / không có ảnh -> bỏ BOX_TINY
+        seen = []                                                      # các box hợp lệ ở dòng TRƯỚC: (id, cx, cy, w, h)
+        for no, text in ds.read_label_lines(stem) or []:              # số dòng gốc, đã bỏ dòng trống
+            try:
+                c, x, y, w, h = parse_yolo_line(text)
+            except ValueError as e:
+                add(ERROR, "BAD_FORMAT", stem, f"dòng sai định dạng: {e}", no)
+                continue
+            if not 0 <= c < n_cls:
+                add(ERROR, "BAD_CLASS_ID", stem, f"id lớp {c} ngoài 0..{n_cls - 1}", no)
+                continue
+            if w <= 0 or h <= 0:
+                add(ERROR, "BOX_ZERO", stem, f"box rỗng w={w} h={h}", no)
+                continue
+
+            # mức tràn lớn nhất trên 4 mép
+            overflow = max(0.0, -(x - w / 2), (x + w / 2) - 1, -(y - h / 2), (y + h / 2) - 1)
+            if overflow > tol:
+                add(ERROR, "BOX_OUT_OF_IMAGE", stem, f"box tràn ảnh {overflow:.4f}", no, overflow=round(overflow, 6))
+
+            box = (c, x, y, w, h)
+            if any(p[0] == c and iou_xywh(p[1:], box[1:]) > dup_iou for p in seen):
+                add(ERROR, "DUP_BOX", stem, f"box lặp (cùng lớp, IoU > {dup_iou}) với dòng trước", no)
+            seen.append(box)
+
+            if size:
+                short = min(w * size[0], h * size[1])
+                if short < min_px:
+                    add(WARN, "BOX_TINY", stem, f"cạnh ngắn {short:.1f}px < {min_px}px", no, short_px=round(short, 1))
+            if w * h > max_frac:
+                add(WARN, "BOX_HUGE", stem, f"box chiếm {w * h:.0%} ảnh", no, frac=round(w * h, 4))
+    return issues
