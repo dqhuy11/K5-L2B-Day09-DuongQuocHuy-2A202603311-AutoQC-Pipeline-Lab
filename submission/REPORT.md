@@ -76,4 +76,10 @@ Lỗi tự nhìn thấy trên `work/viz/`: img_0078 có xe trắng bên trái kh
 **(b) Dùng AI (Claude Code):**
 - *Prompt chính:* "viết 4 module" — AI đọc docstring stub (đầu vào/đầu ra, bảng mã lỗi, ngưỡng trong `cfg`) và toàn bộ file test làm ca biên, rồi viết code; không đụng file "ĐÃ VIẾT SẴN"/`tests/`/`data/`.
 - *Cách kiểm:* `pytest` 79/79 xanh; tự chạy thêm 3 ca khó (một dòng tràn + trùng → chỉ 1 `drop_line`; dòng trống giữa file giữ số dòng gốc; nhiều dự đoán trên một ảnh, chạy autofix lần 2 không đổi gì); sweep calib trùng khớp bảng mẫu của đề; đọc lại từng dòng.
-- *1 lần AI sai:* khi viết `gate.py`, AI sinh một dòng nháp sai cú pháp (`def decide(...) if False else None`) trong script ghi file; phát hiện trước khi ghi đè, viết lại hàm bằng Edit và chạy `test_gate.py` để xác nhận.
+- *1 lần AI sai:* (thêm) test thưởng đầu tiên đặt ngưỡng IoU = 1.0 cho hai box giống hệt nhau và fail vì sai số float; sửa test sang cặp box có IoU tính tay ≈ 0,818. Và khi viết `gate.py`, AI sinh một dòng nháp sai cú pháp (`def decide(...) if False else None`) trong script ghi file; phát hiện trước khi ghi đè, viết lại hàm bằng Edit và chạy `test_gate.py` để xác nhận.
+
+## Thưởng: check mới `class_conflict` (một vật hai lớp)
+`pipeline/checks/class_conflict.py` + `tests/test_class_conflict.py` (6 test: báo ở dòng sau, cùng lớp để cho DUP_BOX, chồng một phần thì im, ngưỡng đọc từ cfg + mặc định, dòng hỏng/trống giữ số dòng, 3 lớp trên một vật). `DUP_BOX` chỉ bắt box lặp **cùng lớp**; check này cảnh báo (WARN, không tự xoá) khi hai box **khác lớp** có IoU > 0,8.
+Chạy riêng vì registry check và config đã ghim: `python -m pipeline.checks.class_conflict work/run/ds --out submission/extra/class_conflict_clean.csv`.
+
+Kết quả: **2/224 ảnh raw**, và cả 2 **vẫn còn trong clean_v1** (pipeline chính không bắt): img_0037 dòng 9 truck trùng car dòng 8 (IoU 0,98, chiếc bán tải giữa ảnh), img_0153 dòng 6 truck trùng bus dòng 3 (IoU 0,97, xe ở xa). Số ảnh bị cờ không đổi với mọi ngưỡng 0,6–0,9, nên ngưỡng không nhạy. gold_val (nhãn người) cũng có 1 ca (car+truck, IoU 1,0) → đây là nhãn mơ hồ có thật trong COCO, đúng là việc của người quyết, nên chỉ cảnh báo.
