@@ -39,6 +39,67 @@ from ..common import WARN, Issue, iou_xywh, parse_yolo_line  # noqa: F401
 from ..model_cache import get_preds  # noqa: F401
 
 
+def _valid_lines(ds, stem):
+    """[(số dòng gốc, (id, cx, cy, w, h))] của các dòng parse được và id lớp hợp lệ."""
+    out = []
+    for no, text in ds.read_label_lines(stem) or []:
+        try:
+            b = parse_yolo_line(text)
+        except ValueError:
+            continue
+        if 0 <= b[0] < len(ds.classes):
+            out.append((no, b))
+    return out
+
+
 def run(ds, cfg, preds=None):
-    # TODO
-    raise NotImplementedError("check second_opinion chưa làm")
+    so = cfg["second_opinion"]
+    conf, min_area, fp_conf = so["conf"], so["min_area_px"], so["fp_conf"]
+    iou_missing, iou_match, iou_loose = so["iou_missing"], so["iou_match"], so["iou_loose"]
+    if preds is None:
+        preds = get_preds(ds, cfg, "checker")
+
+    issues = []
+    for p in ds.image_files():
+        stem = p.stem
+        if stem not in preds or ds.read_label_lines(stem) is None:
+            continue
+        rows = preds[stem] or []
+        labels = _valid_lines(ds, stem)
+        size = ds.image_size(stem)
+
+        def add(code, msg, line=None, **extra):
+            issues.append(Issue("second_opinion", WARN, code, stem, msg, line, extra))
+
+        # (A) Từng dự đoán đủ tin cậy + đủ lớn: model thấy gì mà nhãn không khớp?
+        for r in rows:
+            rc, rconf, rbox = int(r[0]), float(r[1]), r[2:6]
+            if rconf < conf:
+                continue
+            if size and rbox[2] * size[0] * rbox[3] * size[1] < min_area:
+                continue
+            cands = [(iou_xywh(rbox, b[1:]), b[0]) for _, b in labels]
+            cands = [(v, c) for v, c in cands if v >= iou_missing]
+            same = [v for v, c in cands if c == rc]
+            other = [v for v, c in cands if c != rc]
+            if not cands:
+                add("POSSIBLE_MISSING", f"model thấy {ds.classes[rc]} (conf {rconf:.2f}) mà nhãn không có box",
+                    conf=rconf, cls=rc, box=list(rbox))
+            elif same:
+                if max(same) < iou_loose:
+                    add("POSSIBLE_LOOSE_BOX", f"box {ds.classes[rc]} lệch/lỏng: IoU {max(same):.2f} < {iou_loose}",
+                        conf=rconf, iou=round(max(same), 4))
+                # cùng lớp và đủ khít -> nhãn đã phủ vật này, không cờ
+            elif max(other) >= iou_match:
+                add("POSSIBLE_WRONG_CLASS", f"model nói {ds.classes[rc]} (conf {rconf:.2f}) nhưng nhãn khác lớp, IoU {max(other):.2f}",
+                    conf=rconf, iou=round(max(other), 4), cls=rc)
+            # chỉ có khác lớp với IoU trong [iou_missing, iou_match): mơ hồ -> im lặng
+
+        # (B) Từng dòng nhãn: có khớp với BẤT KỲ dự đoán nào (conf >= fp_conf, không lọc diện tích) không?
+        loose_preds = [r[2:6] for r in rows if float(r[1]) >= fp_conf]
+        for no, b in labels:
+            best = max((iou_xywh(b[1:], rb) for rb in loose_preds), default=0.0)
+            if best < iou_missing:
+                add("POSSIBLE_FALSE_POS", f"box {ds.classes[b[0]]} không khớp vật nào model thấy (IoU tốt nhất {best:.2f})",
+                    no, iou=round(best, 4))
+    return issues
