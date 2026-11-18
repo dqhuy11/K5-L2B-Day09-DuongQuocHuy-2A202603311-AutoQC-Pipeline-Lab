@@ -68,7 +68,25 @@ exit=20     ls work/exp_nb -> No such file or directory
 Lỗi tự nhìn thấy trên `work/viz/`: img_0078 có xe trắng bên trái không có box (máy cũng cờ POSSIBLE_MISSING, conf 0,85) và box xe sát mép phải tràn 0,03 (đã clip); img_0083 xe nhỏ ở xa gán "bus" khó xác định; img_0084/img_0074 là ảnh trùng không bị loại.
 
 ## 5. Train: raw vs clean (tùy chọn, chấm riêng)
-**Chưa chạy.** Phần train là tùy chọn và cần push `submission/export` lên repo public trước rồi chạy notebook trên Colab (GPU); ở bản nộp này em ưu tiên hoàn thành pipeline, calibration và báo cáo. Nếu chạy sau, sẽ so chênh mAP50 với độ lệch chuẩn giữa 2 seed và chỉ kết luận "clean tốt hơn" khi chênh vượt nhiễu.
+Colab T4, `scripts/train_compare.py`: `yolo26n.pt`, 20 epoch, imgsz 640, batch 16, seed 0 và 1. Hai biến thể dùng cùng val (gold_val, 40 ảnh) và cùng test (100 ảnh nhãn người), chỉ khác dữ liệu train. `manifest_sha1`/`config_sha1` trong `results/*.json` khớp bản export và config đã nộp (`check_submission.py` không báo lỗi phần train).
+
+| biến thể | #ảnh train | số seed | map50 (TB ± độ lệch) | map50_95 (TB ± độ lệch) | precision (TB ± độ lệch) | recall (TB ± độ lệch) |
+|---|---|---|---|---|---|---|
+| raw | 224 | 2 | 0.726 ± 0.000 | 0.512 ± 0.004 | 0.764 ± 0.061 | 0.649 ± 0.028 |
+| clean | 202 | 2 | 0.701 ± 0.025 | 0.487 ± 0.008 | 0.759 ± 0.003 | 0.625 ± 0.019 |
+
+**Chênh mAP50 (clean − raw) = −0,025**, xấp xỉ **1 lần độ lệch giữa 2 seed của clean** (0,025). Từng seed: raw 0,7256 / 0,7259, clean 0,718 / 0,683, nên seed tốt của clean gần bằng raw. mAP50-95 chênh −0,024, lớn hơn độ lệch seed (0,004–0,008), nghĩa là raw nhỉnh hơn một chút về độ khít box.
+**Kết luận trung thực:** dữ liệu **không** cho thấy clean tốt hơn raw. Trên mAP50, chênh lệch nằm trong mức nhiễu nên chưa kết luận được chiều nào. Chỉ có 2 seed nên chính độ lệch chuẩn cũng ước lượng rất thô (độ lệch 0,000 của raw là do may mắn, không có nghĩa raw ổn định).
+
+AP50 theo lớp (TB 2 seed, raw → clean): car 0,738 → 0,738; person 0,822 → 0,823; bus 0,695 → 0,703; **truck 0,648 → 0,538**. Toàn bộ khoảng chênh đến từ lớp truck, mà chính truck của clean cũng dao động 0,590 / 0,486 giữa 2 seed.
+
+**Giả thuyết và cách kiểm:**
+1. **Raw được "cộng điểm" nhờ rò rỉ test.** Raw còn 5 ảnh trùng tập test (LEAK_TEST: test_009/033/039/044/085), thêm 8 ảnh trùng từng byte và 4 ảnh gần trùng. Model raw đã "thấy" 5/100 ảnh test lúc train nên điểm test bị thổi phồng. *Kiểm:* chấm lại cả hai model trên 95 ảnh test còn lại (bỏ 5 ảnh rò rỉ), rồi so lại chênh lệch.
+2. **Ultralytics tự "làm sạch cú pháp" cho raw.** Log train của raw cảnh báo đủ loại: ảnh hỏng/cắt cụt, box tràn ảnh, class ID lạ, giá trị âm, sai số cột. Ultralytics tự bỏ các ảnh/nhãn này, nên raw thực ra không bẩn như con số 224 ảnh gợi ý. Phần pipeline đóng góp thêm chủ yếu là sửa ngữ nghĩa (80 ảnh người duyệt) và loại 22 ảnh. *Kiểm:* đếm số ảnh Ultralytics thực sự giữ lại cho raw trong log (lần chạy này em không lưu con số cụ thể) và lặp lại thí nghiệm với raw đã bỏ các ảnh hỏng.
+3. **Clean trộn hai quy ước car/truck.** Số box: raw có car 121 / truck 32, clean có car 101 / truck 41. 80 ảnh người duyệt được thay bằng nhãn người (chuyển một phần car → truck), 122 ảnh còn lại giữ cách gán của người gán ban đầu. Cùng một kiểu xe (bán tải, SUV) có ảnh gán car, có ảnh gán truck; check thưởng `class_conflict` còn thấy 2 vật bị gán cả hai lớp (img_0037, img_0153). Model nhỏ học 20 epoch sẽ bị nhiễu ở đúng lớp truck. *Kiểm:* train biến thể `oracle` (nhãn người toàn bộ) và so AP truck; hoặc duyệt hết hàng đợi để mọi ảnh dùng cùng một quy ước.
+4. **Test nhỏ, lớp truck ít mẫu.** Với 100 ảnh test, vài box truck đổi kết quả là AP truck dao động ±0,05 giữa các seed. *Kiểm:* chạy ≥ 5 seed và báo khoảng tin cậy.
+
+**Việc tiếp theo:** duyệt hết hàng đợi (Release), loại img_0084 và 2 ca `class_conflict`, chấm lại trên test bỏ 5 ảnh rò rỉ, chạy ≥ 5 seed và thêm `oracle` làm chặn trên. Chỉ khi chênh lệch vượt độ lệch giữa các seed mới kết luận dữ liệu sạch giúp model tốt hơn.
 
 ## 6. Quyết định và ghi chú AI
 **(a) Quyết định: HOLD.** Không phát hành clean_v1. Để thành Release cần: người duyệt thêm ít nhất **18 ảnh** trong 38 ảnh còn cảnh báo (để còn ≤ 20/202 < 10%), ưu tiên theo `05_review_queue.csv`; tăng ngân sách duyệt là quyết định của dự án, không phải hạ `conf`. Đồng thời nên loại tay img_0084 (trùng img_0074) trước khi train.
